@@ -12,6 +12,16 @@ no `addBasePath` call, whereas DataTable routes its clicks through `addBasePath`
 `deployment.basePath` empty the two are indistinguishable — which is exactly why the
 difference is easy to ship without noticing.
 
+This page shows both sides of that. Test 1 uses `<LinkedUSMap>` from `components/`, which
+applies `addBasePath` itself and so works under any base path with **nothing hardcoded in
+SQL**. Test 2 uses the raw built-in `<USMap>` and is the live reproduction of the bug —
+under a base path its clicks 404 while the identical map above it works.
+
+Test 3 stays on the raw built-ins. The same wrapper trick does **not** work for the Leaflet
+maps: `Points.svelte` consumes `data` as a store (`$data`, `data.fetch()`, `data.length`),
+so handing it a transformed plain array fails the prerender outright. Those two need either
+the base path in SQL or a fix upstream.
+
 [← Back to the test index](/link-tests)
 
 ```sql state_map
@@ -25,12 +35,13 @@ where state != 'Alaska'   -- deliberately unlinked, matching the table page
 group by state
 ```
 
-## Test 1 — `<USMap link=…>`
+## Test 1 — `<LinkedUSMap link=…>` (base-path safe)
 
 The main map link test: a choropleth of all 50 states plus DC, each clickable through to its
-templated page.
+templated page. Uses the local wrapper, so the link column stays a plain `/states/…` path
+and the base path is applied at render time.
 
-<USMap
+<LinkedUSMap
     data={state_map}
     state=state
     value=sales_usd
@@ -46,10 +57,15 @@ templated page.
 hardest target on the map; zoom the browser if you cannot hit it, or use the table page
 instead.
 
-## Test 2 — a map that deep-links into the nested template
+## Test 2 — deep links, using the RAW built-in `<USMap>`
 
 Same map geometry, but the link column targets `/states/<state>/<category>` for one fixed
 category. Every destination URL has a space in its final segment.
+
+This one deliberately uses the **unwrapped** `<USMap>`. With `deployment.basePath` empty it
+behaves identically to test 1. Set a base path and it diverges: the page still prerenders
+correct hrefs (the build-time crawl applies `addBasePath`) but clicking navigates to the raw
+column value and 404s. Prerender and click disagree inside one component — that is the bug.
 
 ```sql state_map_deep
 select

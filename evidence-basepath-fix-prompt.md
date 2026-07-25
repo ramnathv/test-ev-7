@@ -54,9 +54,64 @@ core-components already imports `addBasePath` from `@evidence-dev/sdk/utils/svel
 2. Render `<InvisibleLinks {data} {link} />` from `PointMap`, `BubbleMap`, and `AreaMap`
    when a `link` prop is set, matching how `_USMap.svelte` and `_DataTable.svelte` do it.
 
+**Do not normalize by transforming the `data` prop upstream.** This was tried and it does
+not work — see "What I ruled out" below. The link value must be rewritten where it is read
+off the row, which is what step 1 does.
+
 **This is backward compatible.** `addBasePath` is idempotent — it returns the path
 untouched when it already starts with the base path — so dashboards that currently work
-around this by hardcoding `/base/...` in their map link columns keep working.
+around this by hardcoding `/base/...` in their map link columns keep working. Confirmed
+directly against `packages/lib/sdk/src/utils/svelte/addBasePath.js`:
+
+| Input | `basePath: "/foo"` | `basePath: ""` |
+|---|---|---|
+| `/states/California` | `/foo/states/California` | unchanged |
+| `/states/New York` | `/foo/states/New York` | unchanged |
+| `/foo/states/Ohio` | unchanged (idempotent) | unchanged |
+
+## Reference implementation
+
+`components/LinkedUSMap.svelte` and `components/withBasePath.js` in the project that found
+this bug implement the same normalisation at the project level, as a wrapper around the
+built-in `<USMap>`. Worth reading before starting — the transform in `withBasePath.js` is
+exactly what step 1 needs to do, and `LinkedUSMap` is a working end-to-end demonstration
+(builds green under both `basePath: ""` and `basePath: "/test-ev-7"`).
+
+Note the import that makes it work without hardcoding anything:
+
+```js
+import { addBasePath } from '@evidence-dev/sdk/utils/svelte';
+```
+
+That export is **already bound to the loaded config** (`packages/lib/sdk/src/utils/svelte/index.js`
+closes over `config` and re-exports a one-arg version), so callers never pass or know the
+base path. The two-arg form in `addBasePath.js` is the unbound one.
+
+## What I ruled out
+
+**Transforming the `data` prop before it reaches the map.** This is the obvious fix and it
+works for `USMap`, whose wrapper accepts a plain array through its own `QueryLoad`. It
+**fails for the Leaflet maps**: `unsorted/viz/map/components/Points.svelte` (~line 331)
+consumes `data` as a Query *store*, not an array —
+
+```svelte
+{#if data && data.length > 0}
+  {#await Promise.all([map.initPromise, data.fetch(), init($theme)]) then}
+    {#each $data as item}
+```
+
+`$data`, `data.fetch()` and `data.length` together mean a transformed plain array satisfies
+none of the contract, and the page 500s during prerender. Verified by bisection: a wrapper
+around `USMap` alone builds clean, and adding the equivalent `PointMap` wrapper fails the
+build with an `Internal Error` on that route. So the fix has to live where `item[link]` is
+read, which is why step 1 targets `Point.svelte` / `MapArea.svelte` rather than the map
+wrappers.
+
+**One implementation note:** `InvisibleLinks` is not exported from the package barrel
+(`dist/index.js` → `atoms/index.js` does not re-export it). That is fine for step 2 since
+`PointMap`/`BubbleMap`/`AreaMap` are inside the same package and can import it by relative
+path, but it does block any out-of-package reuse, and may be worth exporting while you are
+there.
 
 While you're in `addBasePath` (`packages/lib/sdk/src/utils/svelte/addBasePath.js`): the
 `_path.startsWith(basePath)` guard has no path-segment boundary check, so with
@@ -72,9 +127,19 @@ page (`pages/states/[state].md`) linked from a DataTable, a USMap, and a PointMa
 - The PointMap-only route is prerendered into `build/` after the fix, and absent before it.
 - With `basePath: ""` nothing changes — `addBasePath` is a no-op there, so this is the
   regression case that must stay identical.
+- The Leaflet maps still render. Because `Points.svelte` treats `data` as a store, any
+  change near the `link` read is close to code that assumes a live Query — a map that
+  renders under `basePath: ""` but goes blank under a base path means the Query contract
+  got broken, not the link.
 
 Add unit tests alongside the existing core-components tests, and check whether the docs
 site (`sites/docs`) documents the current raw behaviour for `link` anywhere.
+
+A ready-made harness for the manual pass: <https://github.com/ramnathv/test-ev-7>. Its
+`pages/link-tests/from-map.md` puts a wrapped `<LinkedUSMap>` and a raw `<USMap>` on the
+same page, so under a base path the first navigates correctly and the second 404s — a
+direct before/after on one screen. Deployed at
+<https://ramnathv.github.io/test-ev-7/link-tests>, which builds with `basePath: /test-ev-7`.
 
 ---
 
