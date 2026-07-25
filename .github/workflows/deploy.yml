@@ -1,0 +1,86 @@
+name: Deploy to GitHub Pages
+
+# Pages serves this project from a repo subpath (https://<user>.github.io/<repo>/), which
+# needs Evidence's deployment.basePath set. That value can ONLY come from
+# evidence.config.yaml -- Evidence reads that file as plain YAML, with no env-var override
+# -- and it must stay EMPTY in the repo, because `evidence preview` is hardcoded to
+# `npx serve build`, which serves at the server root and 404s every asset when a basePath
+# is set.
+#
+# So: keep it empty for local dev/build/preview, and patch it here for the deploy build
+# only. The checkout is ephemeral, so nothing is written back to the repo.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set basePath to the repo subpath
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          if [[ "$REPO_NAME" == *.github.io ]]; then
+            echo "Served from the domain root; leaving basePath empty."
+            exit 0
+          fi
+          sed -i -E "s|^([[:space:]]*)basePath:.*|\1basePath: \"/${REPO_NAME}\"|" evidence.config.yaml
+          grep -q "basePath: \"/${REPO_NAME}\"" evidence.config.yaml \
+            || { echo "::error::basePath patch did not apply"; exit 1; }
+          echo "basePath set to /${REPO_NAME}"
+
+      - name: Build Evidence project
+        run: |
+          npm run sources
+          npm run build
+
+      # Only needed if Pages ever serves from a branch (Jekyll strips _app/). The Actions
+      # artifact path below does not run Jekyll, but this is free insurance.
+      - name: Disable Jekyll processing
+        run: touch build/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./build
+
+  deploy:
+    needs: build
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
