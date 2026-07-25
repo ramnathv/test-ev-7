@@ -45,6 +45,10 @@ title: Welcome to Evidence
     series=category
 />
 
+## Test pages
+
+- [Templated page link tests](/link-tests) — templated pages reached from tables and maps
+
 ## What's Next?
 - [Connect your data sources](settings)
 - Edit/add markdown files in the `pages` folder
